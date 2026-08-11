@@ -277,14 +277,27 @@ jobs:
         run: |
           $tag = "v$env:NEXT_VERSION"
           $pkg = Get-ChildItem -Path "${{ github.workspace }}\AppPackages" `
-            -Recurse -Filter "*.appxupload" |
+            -Recurse -Filter "*.appx" |
             Sort-Object LastWriteTime -Descending |
             Select-Object -First 1
+          if (-not $pkg) {
+            Write-Error "No .appx package found in AppPackages/."
+          }
+
+          $downloadUrl = "https://github.com/${{ github.repository }}/releases/download/$tag/$($pkg.Name)"
+          $notes = @(
+            "Sideload package release for HoloLens.",
+            "",
+            "Direct .appx download: [$($pkg.Name)]($downloadUrl)",
+            "",
+            "Microsoft Store submission continues to use the .appxupload package."
+          ) -join "`n"
+
           Write-Host "Creating release $tag with package: $($pkg.Name)"
           $bumpSha = git rev-parse HEAD
           gh release create $tag `
             --title "HololensSatelliteViewer $tag" `
-            --notes "Store submission of version $env:NEXT_VERSION." `
+            --notes $notes `
             --target $bumpSha `
             "$($pkg.FullName)"
           Write-Host "Release $tag created: https://github.com/turbolego/HololensSatelliteViewer/releases/tag/$tag"

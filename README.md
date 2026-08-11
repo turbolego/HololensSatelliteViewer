@@ -228,6 +228,8 @@ Triggered by a `v*.*.*` git tag. Same build as above plus:
 2. Submission to Partner Center via `microsoft-store-apppublisher` action
    (requires `AZURE_AD_TENANT_ID`, `AZURE_AD_CLIENT_ID`,
    `AZURE_AD_CLIENT_SECRET`, `SELLER_ID` secrets configured in repo)
+3. GitHub release publication with the sideloadable `.appx` attached and linked
+  directly in the release description
 
 ---
 
