@@ -15,8 +15,10 @@ using Windows.Graphics.DirectX.Direct3D11;
 using Windows.Graphics.Holographic;
 using Windows.Perception.Spatial;
 using Windows.UI.Input.Spatial;
+using Windows.UI.Popups;
 
 using HololensSatelliteViewer.Common;
+using HololensSatelliteViewer.Models;
 using HololensSatelliteViewer.Services;
 using System.Threading.Tasks;
 using Windows.Foundation;
@@ -51,6 +53,9 @@ namespace HololensSatelliteViewer
 
         // Keep track of mouse input.
         bool pointerPressed = false;
+
+        // Guard against stacking satellite info dialogs.
+        private bool _infoDialogShowing = false;
 
         // Represents the holographic space around the user.
         HolographicSpace holographicSpace;
@@ -222,7 +227,10 @@ namespace HololensSatelliteViewer
                 }
 
                 SpatialInteractionSourceState pointerState = spatialInputHandler.CheckForInput();
-                pointerPressed = false;
+                if (pointerState != null)
+                {
+                    pointerPressed = true;
+                }
 
                 // Always obtain the current head pose every frame so the sky-dome
                 // tracks the user as they move through the room.
@@ -230,6 +238,18 @@ namespace HololensSatelliteViewer
                 // prediction and is always valid while positional tracking is active.
                 SpatialPointerPose headPose = SpatialPointerPose.TryGetAtTimestamp(
                     stationaryReferenceFrame.CoordinateSystem, prediction.Timestamp);
+
+                // Check for satellite tap
+                if (pointerPressed && !_infoDialogShowing)
+                {
+                    var hitSat = satelliteRenderer.CheckSatelliteHit(headPose);
+                    if (hitSat != null)
+                    {
+                        ShowSatelliteInfoDialog(hitSat);
+                    }
+                }
+
+                pointerPressed = false;
 
                 // Read the latest compass heading (updated on background thread by CompassService)
                 float compassHeading = compassService?.CurrentHeadingDegrees ?? 0f;
@@ -621,6 +641,49 @@ namespace HololensSatelliteViewer
                     // with the origin placed at the device's position as the app is launched.
                     this.stationaryReferenceFrame = this.spatialLocator.CreateStationaryFrameOfReferenceAtCurrentLocation();
                 }
+            }
+        }
+
+        private async void ShowSatelliteInfoDialog(Satellite sat)
+        {
+            if (_infoDialogShowing) return;
+            _infoDialogShowing = true;
+
+            try
+            {
+                double altKm = sat.AltitudeKm;
+                double rangeKm = sat.RangeKm;
+                double velKmS = sat.VelocityKmPerSec;
+
+                var detail = string.Format(
+                    "Name: {0}\n" +
+                    "NORAD ID: {1}\n" +
+                    "Azimuth: {2:F1}°\n" +
+                    "Elevation: {3:F1}°\n" +
+                    "Range: {4:F0} km\n" +
+                    "Altitude: {5:F0} km\n" +
+                    "Velocity: {6:F2} km/s",
+                    sat.Name,
+                    sat.NoradId,
+                    sat.Azimuth,
+                    sat.Elevation,
+                    rangeKm,
+                    altKm,
+                    velKmS);
+
+                var dialog = new MessageDialog(detail, "Satellite Details");
+                dialog.Commands.Add(new UICommand("Close", cmd => { }));
+                dialog.DefaultCommandIndex = 0;
+                dialog.CancelCommandIndex = 0;
+                await dialog.ShowAsync();
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine($"[SatelliteInfo] Dialog error: {ex.Message}");
+            }
+            finally
+            {
+                _infoDialogShowing = false;
             }
         }
     }
