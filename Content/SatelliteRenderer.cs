@@ -664,7 +664,7 @@ namespace HololensSatelliteViewer.Content
 
         /// <summary>
         /// Checks if the user's gaze hits any satellite marker cube.
-        /// Returns the first hit satellite, or null if none.
+        /// Returns the closest hit along the gaze ray, or null if none.
         /// </summary>
         public Satellite CheckSatelliteHit(SpatialPointerPose headPose)
         {
@@ -674,21 +674,38 @@ namespace HololensSatelliteViewer.Content
             Vector3 gazeOrigin = headPose.Head.Position;
             float hitRadiusSq = SatCubeScale * SatCubeScale * 4f;
 
-            for (int i = 0; i < satellites.Count; i++)
+            // Snapshot volatile list to avoid InvalidOperationException
+            var snapshot = satellites;
+
+            // Compass rotation must match DrawCubeAt exactly
+            float headingRad = (float)(-compassHeadingDegrees * Math.PI / 180.0);
+            Matrix4x4 compassRot = Matrix4x4.CreateRotationY(headingRad);
+
+            Satellite bestHit = null;
+            float bestT = float.MaxValue;
+
+            for (int i = 0; i < snapshot.Count; i++)
             {
-                var sat = satellites[i];
-                var markerPos = ComputeSatellitePosition(sat);
+                var sat = snapshot[i];
+                var worldPos = ComputeSatellitePosition(sat);
+
+                // Apply same compass rotation as DrawCubeAt
+                Vector3 local = worldPos - worldCenter;
+                Vector3 markerPos = Vector3.Transform(local, compassRot) + worldCenter;
 
                 Vector3 toMarker = markerPos - gazeOrigin;
                 float t = Vector3.Dot(toMarker, gazeDir);
-                if (t < 0) continue;
+                if (t < 0 || t >= bestT) continue;
 
                 Vector3 closestPoint = gazeOrigin + gazeDir * t;
                 float distSq = (markerPos - closestPoint).LengthSquared();
                 if (distSq < hitRadiusSq)
-                    return sat;
+                {
+                    bestT = t;
+                    bestHit = sat;
+                }
             }
-            return null;
+            return bestHit;
         }
     }
 }
