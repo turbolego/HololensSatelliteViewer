@@ -661,5 +661,34 @@ namespace HololensSatelliteViewer.Content
         {
             public Matrix4x4 model;
         }
+
+        /// <summary>
+        /// Checks if the user's gaze hits any satellite marker cube.
+        /// Returns the first hit satellite, or null if none.
+        /// </summary>
+        public Satellite CheckSatelliteHit(SpatialPointerPose headPose)
+        {
+            if (headPose == null) return null;
+
+            Vector3 gazeDir = headPose.Head.ForwardDirection;
+            Vector3 gazeOrigin = headPose.Head.Position;
+            float hitRadiusSq = SatCubeScale * SatCubeScale * 4f;
+
+            for (int i = 0; i < satellites.Count; i++)
+            {
+                var sat = satellites[i];
+                var markerPos = ComputeSatellitePosition(sat);
+
+                Vector3 toMarker = markerPos - gazeOrigin;
+                float t = Vector3.Dot(toMarker, gazeDir);
+                if (t < 0) continue;
+
+                Vector3 closestPoint = gazeOrigin + gazeDir * t;
+                float distSq = (markerPos - closestPoint).LengthSquared();
+                if (distSq < hitRadiusSq)
+                    return sat;
+            }
+            return null;
+        }
     }
 }
