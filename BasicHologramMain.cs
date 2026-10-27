@@ -23,7 +23,6 @@ using HololensSatelliteViewer.Services;
 using System.Threading.Tasks;
 using Windows.Foundation;
 using System.Collections.Generic;
-using Windows.UI.Popups;
 using Windows.Storage;
 
 #if DRAW_SAMPLE_CONTENT
