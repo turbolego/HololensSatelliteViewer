@@ -16,7 +16,6 @@ namespace HololensSatelliteViewer.Content
         private readonly DeviceResources deviceResources;
         private readonly OrbitService orbitService;
         private readonly GeolocationService geolocationService;
-        private readonly CompassService compassService;
 
         private SharpDX.Direct3D11.InputLayout inputLayout;
         private SharpDX.Direct3D11.Buffer vertexBuffer;
@@ -48,6 +47,11 @@ namespace HololensSatelliteViewer.Content
         private Vector3 worldCenter = Vector3.Zero;
         private bool worldCenterLocked;
         private float ceilingY;
+        private Vector3 settingsButtonPosition = Vector3.Zero;
+        private bool hasObserverFix;
+        private double currentLatitude;
+        private double currentLongitude;
+        private float radarSweepAngle;
 
         /// <summary>
         /// Latest compass heading in degrees (0=North, 90=East, 180=South, 270=West).
@@ -65,6 +69,8 @@ namespace HololensSatelliteViewer.Content
         private const float SatelliteLabelSize = 0.10f;
         private const float DebugTextSize = 0.08f;
         private const float DebugLineSpacing = 0.08f;
+        private const float FloorRadarRadius = 0.8f;
+        private const float FloorRadarOffset = 0.5f;
 
         private const int AtlasCols = 16;
         private const int AtlasRows = 8;
@@ -73,31 +79,11 @@ namespace HololensSatelliteViewer.Content
 
         private readonly Dictionary<int, TrackState> tracks = new Dictionary<int, TrackState>();
 
-        private static readonly Dictionary<char, ushort> GlyphBits = new Dictionary<char, ushort>
-        {
-            {'A', 0b_010_101_111_101_101}, {'B', 0b_110_101_110_101_110}, {'C', 0b_011_100_100_100_011},
-            {'D', 0b_110_101_101_101_110}, {'E', 0b_111_100_110_100_111}, {'F', 0b_111_100_110_100_100},
-            {'G', 0b_011_100_101_101_011}, {'H', 0b_101_101_111_101_101}, {'I', 0b_111_010_010_010_111},
-            {'J', 0b_001_001_001_101_010}, {'K', 0b_101_101_110_101_101}, {'L', 0b_100_100_100_100_111},
-            {'M', 0b_101_111_101_101_101}, {'N', 0b_101_111_111_111_101}, {'O', 0b_010_101_101_101_010},
-            {'P', 0b_110_101_110_100_100}, {'Q', 0b_010_101_101_111_011}, {'R', 0b_110_101_110_110_101},
-            {'S', 0b_011_100_010_001_110}, {'T', 0b_111_010_010_010_010}, {'U', 0b_101_101_101_101_111},
-            {'V', 0b_101_101_101_101_010}, {'W', 0b_101_101_111_111_101}, {'X', 0b_101_101_010_101_101},
-            {'Y', 0b_101_101_010_010_010}, {'Z', 0b_111_001_010_100_111}, {'0', 0b_111_101_101_101_111},
-            {'1', 0b_010_110_010_010_111}, {'2', 0b_111_001_111_100_111}, {'3', 0b_111_001_111_001_111},
-            {'4', 0b_101_101_111_001_001}, {'5', 0b_111_100_111_001_111}, {'6', 0b_111_100_111_101_111},
-            {'7', 0b_111_001_010_010_010}, {'8', 0b_111_101_111_101_111}, {'9', 0b_111_101_111_001_111},
-            {'-', 0b_000_000_111_000_000}, {'_', 0b_000_000_000_000_111}, {'.', 0b_000_000_000_000_010},
-            {':', 0b_000_010_000_010_000}, {',', 0b_000_000_000_010_100}, {' ', 0}
-        };
-
         public SatelliteRenderer(DeviceResources deviceResources)
         {
             this.deviceResources = deviceResources;
             this.orbitService = new OrbitService();
             this.geolocationService = new GeolocationService();
-            this.compassService = new CompassService();
-            this.compassService.Initialize();
             CreateDeviceDependentResourcesAsync();
         }
 
@@ -124,14 +110,29 @@ namespace HololensSatelliteViewer.Content
                 fetchInProgress = true;
                 try
                 {
-                    var gps = await geolocationService.GetCurrentLocationAsync();
-                    if (gps != null)
+                    double latitude;
+                    double longitude;
+                    if (LocationOverrideStore.TryGet(out latitude, out longitude))
                     {
-                        var lat = gps.Coordinate.Point.Position.Latitude;
-                        var lon = gps.Coordinate.Point.Position.Longitude;
-                        var altKm = gps.Coordinate.Point.Position.Altitude / 1000.0;
-                        orbitService.SetObserverLocation(lat, lon, altKm);
-                        gpsDebug = string.Format(CultureInfo.InvariantCulture, "GPS {0:F3},{1:F3}", lat, lon);
+                        ApplyObserverLocation(latitude, longitude, 0.0, true);
+                    }
+                    else
+                    {
+                        int locationGeneration = LocationOverrideStore.GetGeneration();
+                        var gps = await geolocationService.GetCurrentLocationAsync();
+                        if (LocationOverrideStore.TryGet(out latitude, out longitude))
+                        {
+                            ApplyObserverLocation(latitude, longitude, 0.0, true);
+                        }
+                        else if (locationGeneration == LocationOverrideStore.GetGeneration() && gps != null)
+                        {
+                            var position = gps.Coordinate.Point.Position;
+                            ApplyObserverLocation(
+                                position.Latitude,
+                                position.Longitude,
+                                position.Altitude / 1000.0,
+                                false);
+                        }
                     }
 
                     var live = await orbitService.GetLiveSatellitesAsync();
@@ -158,6 +159,20 @@ namespace HololensSatelliteViewer.Content
             }
         }
 
+        private void ApplyObserverLocation(double latitude, double longitude, double altitudeKm, bool isManual)
+        {
+            currentLatitude = latitude;
+            currentLongitude = longitude;
+            hasObserverFix = true;
+            orbitService.SetObserverLocation(latitude, longitude, altitudeKm);
+            gpsDebug = string.Format(
+                CultureInfo.InvariantCulture,
+                "{0} {1:F3},{2:F3}",
+                isManual ? "GPS MANUAL" : "GPS",
+                latitude,
+                longitude);
+        }
+
         public void Render()
         {
             if (!loadingComplete || !worldCenterLocked)
@@ -166,7 +181,9 @@ namespace HololensSatelliteViewer.Content
             }
 
             RenderSatellites();
+            RenderFloorRadar();
             RenderText();
+            RenderFloorCompassLabels();
         }
 
         public Vector3 Position => worldCenter;
@@ -177,6 +194,35 @@ namespace HololensSatelliteViewer.Content
         public void SetCompassHeading(float degrees)
         {
             compassHeadingDegrees = degrees;
+        }
+
+        public double CurrentLatitude => currentLatitude;
+        public double CurrentLongitude => currentLongitude;
+        public bool HasObserverFix => hasObserverFix;
+
+        public bool CheckSettingsHit(SpatialPointerPose headPose)
+        {
+            if (headPose == null || settingsButtonPosition == Vector3.Zero)
+            {
+                return false;
+            }
+
+            var gazeDirection = Vector3.Normalize(headPose.Head.ForwardDirection);
+            float headingRadians = (float)(-compassHeadingDegrees * Math.PI / 180.0);
+            var compassRotation = Matrix4x4.CreateRotationY(headingRadians);
+            var buttonPosition = Vector3.Transform(
+                settingsButtonPosition - worldCenter,
+                compassRotation) + worldCenter;
+            var toButton = buttonPosition - headPose.Head.Position;
+            float distanceAlongGaze = Vector3.Dot(toButton, gazeDirection);
+            if (distanceAlongGaze <= 0.0f)
+            {
+                return false;
+            }
+
+            var closestPoint = headPose.Head.Position + gazeDirection * distanceAlongGaze;
+            const float hitRadius = 0.24f;
+            return (buttonPosition - closestPoint).LengthSquared() < hitRadius * hitRadius;
         }
 
         private void RenderSatellites()
@@ -201,6 +247,102 @@ namespace HololensSatelliteViewer.Content
                 var pos = ComputeSatellitePosition(sat);
                 DrawCubeAt(pos, SatCubeScale, compassHeadingDegrees);
             }
+        }
+
+        private void RenderFloorRadar()
+        {
+            float floorY = worldCenter.Y - FloorRadarOffset;
+            float[] ringRadii = { FloorRadarRadius / 3.0f, FloorRadarRadius * 2.0f / 3.0f, FloorRadarRadius };
+            for (int ringIndex = 0; ringIndex < ringRadii.Length; ringIndex++)
+            {
+                float radius = ringRadii[ringIndex];
+                int segments = ringIndex == ringRadii.Length - 1 ? 32 : 16;
+                for (int i = 0; i < segments; i++)
+                {
+                    float angle = (float)(i * Math.PI * 2.0 / segments);
+                    Vector3 position = new Vector3(
+                        worldCenter.X + (float)Math.Sin(angle) * radius,
+                        floorY,
+                        worldCenter.Z - (float)Math.Cos(angle) * radius);
+                    DrawCubeAt(position, 0.24f, compassHeadingDegrees);
+                }
+            }
+
+            for (int i = 0; i < 8; i++)
+            {
+                float fraction = i / 8.0f;
+                float angle = radarSweepAngle;
+                Vector3 position = new Vector3(
+                    worldCenter.X + (float)Math.Sin(angle) * FloorRadarRadius * fraction,
+                    floorY,
+                    worldCenter.Z - (float)Math.Cos(angle) * FloorRadarRadius * fraction);
+                DrawCubeAt(position, 0.3f, compassHeadingDegrees);
+            }
+
+            foreach (var satellite in satellites)
+            {
+                float elevation = (float)Math.Max(0.0, Math.Min(90.0, satellite.Elevation));
+                float radius = FloorRadarRadius * (1.0f - elevation / 90.0f);
+                float azimuth = (float)(satellite.Azimuth * Math.PI / 180.0);
+                Vector3 position = new Vector3(
+                    worldCenter.X + (float)Math.Sin(azimuth) * radius,
+                    floorY + 0.025f,
+                    worldCenter.Z - (float)Math.Cos(azimuth) * radius);
+                DrawCubeAt(position, 0.45f, compassHeadingDegrees);
+            }
+
+            radarSweepAngle = (float)((DateTime.UtcNow.TimeOfDay.TotalSeconds * 0.8) % (Math.PI * 2.0));
+        }
+
+        private void RenderFloorCompassLabels()
+        {
+            var context = deviceResources.D3DDeviceContext;
+            context.InputAssembler.InputLayout = textInputLayout;
+            context.InputAssembler.PrimitiveTopology = SharpDX.Direct3D.PrimitiveTopology.TriangleList;
+            context.InputAssembler.SetVertexBuffers(
+                0,
+                new SharpDX.Direct3D11.VertexBufferBinding(
+                    textVertexBuffer,
+                    SharpDX.Utilities.SizeOf<TextVertex>(),
+                    0));
+            context.InputAssembler.SetIndexBuffer(textIndexBuffer, SharpDX.DXGI.Format.R16_UInt, 0);
+            context.VertexShader.SetShader(textVertexShader, null, 0);
+            context.VertexShader.SetConstantBuffers(0, modelConstantBuffer);
+            if (!usingVprtShaders)
+            {
+                context.GeometryShader.SetShader(textGeometryShader, null, 0);
+            }
+            context.PixelShader.SetShader(textPixelShader, null, 0);
+            context.PixelShader.SetShaderResource(0, glyphAtlasSrv);
+            context.PixelShader.SetSampler(0, textSampler);
+
+            float floorY = worldCenter.Y - FloorRadarOffset;
+            DrawTextBillboard(
+                "N",
+                new Vector3(worldCenter.X, floorY + 0.035f, worldCenter.Z - FloorRadarRadius - 0.1f),
+                DebugTextSize,
+                true,
+                compassHeadingDegrees);
+            DrawTextBillboard(
+                "E",
+                new Vector3(worldCenter.X + FloorRadarRadius + 0.1f, floorY + 0.035f, worldCenter.Z),
+                DebugTextSize,
+                true,
+                compassHeadingDegrees);
+            DrawTextBillboard(
+                "S",
+                new Vector3(worldCenter.X, floorY + 0.035f, worldCenter.Z + FloorRadarRadius + 0.1f),
+                DebugTextSize,
+                true,
+                compassHeadingDegrees);
+            DrawTextBillboard(
+                "W",
+                new Vector3(worldCenter.X - FloorRadarRadius - 0.1f, floorY + 0.035f, worldCenter.Z),
+                DebugTextSize,
+                true,
+                compassHeadingDegrees);
+
+            context.PixelShader.SetShaderResource(0, null);
         }
 
         private void RenderText()
@@ -264,6 +406,17 @@ namespace HololensSatelliteViewer.Content
             }
 
             float startY = panelCenter.Y + 0.35f;
+            settingsButtonPosition = new Vector3(
+                panelCenter.X - 0.7f,
+                startY + 0.15f,
+                panelCenter.Z);
+            DrawTextBillboard(
+                "SETTINGS",
+                settingsButtonPosition,
+                DebugTextSize * 1.2f,
+                false,
+                compassHeadingDegrees);
+
             for (int i = 0; i < lines.Count && i < 11; i++)
             {
                 Vector3 p = new Vector3(panelCenter.X - 0.7f, startY - i * DebugLineSpacing, panelCenter.Z);
@@ -322,7 +475,7 @@ namespace HololensSatelliteViewer.Content
                 return;
             }
 
-            float advance = size * 0.60f;
+            float advance = size * 0.78f;
             float start = -((text.Length - 1) * advance) * 0.5f;
 
             for (int i = 0; i < text.Length; i++)
@@ -418,22 +571,15 @@ namespace HololensSatelliteViewer.Content
                 int gx = (idx % AtlasCols) * GlyphCellW;
                 int gy = (idx / AtlasCols) * GlyphCellH;
 
-                ushort bits;
-                if (!GlyphBits.TryGetValue(c, out bits))
+                var rows = BitmapGlyphFont.GetRows(c);
+                for (int r = 0; r < BitmapGlyphFont.GlyphHeight; r++)
                 {
-                    bits = 0;
-                }
-
-                for (int r = 0; r < 5; r++)
-                {
-                    for (int cc = 0; cc < 3; cc++)
+                    for (int cc = 0; cc < BitmapGlyphFont.GlyphWidth; cc++)
                     {
-                        int bitIdx = r * 3 + cc;
-                        bool on = ((bits >> (14 - bitIdx)) & 1) == 1;
-                        if (!on) continue;
+                        if (rows[r][cc] != '#') continue;
 
-                        int px0 = gx + 2 + cc * 4;
-                        int py0 = gy + 3 + r * 4;
+                        int px0 = gx + 1 + cc * 2;
+                        int py0 = gy + 3 + r * 2;
                         for (int yy = 0; yy < 3; yy++)
                         {
                             for (int xx = 0; xx < 3; xx++)

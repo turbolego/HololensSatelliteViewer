@@ -50,6 +50,13 @@ Put on the HoloLens and launch the app:
   - Your current **GPS coordinates**
   - TLE data stats (loaded, propagated, above horizon)
   - Each visible satellite's **name, azimuth, elevation, and relative X/Z position**
+- A gaze-selectable **Settings** button opens a location modal. Choose a city
+  preset, select one of the three closest airports, choose a sample geohash,
+  adjust latitude/longitude, return to device GPS, or align north to your
+  current compass direction. Manual locations and north calibration are
+  retained for the session and across launches, respectively.
+- A **floor compass radar** shows satellite bearings and elevations around
+  you, with cardinal labels aligned to calibrated north.
 - Because black pixels are transparent on HoloLens's see-through display, the
   scene appears to **float in the real world** — no background, no window frame.
 
@@ -60,11 +67,15 @@ Put on the HoloLens and launch the app:
 | Step | Detail |
 |---|---|
 | **GPS** | HoloLens `Geolocator` gets the device's current lat/lon/altitude |
+| **Location settings** | Change the observer using city presets or stepwise coordinate adjustments, or restore automatic device GPS |
+| **Airport and geohash entry** | Select from the three nearest airports in the bundled OurAirports catalog or preview and apply sample geohashes |
+| **North calibration** | Save a compass offset from the settings modal so the direction you face becomes the satellite dome's north reference |
+| **Floor radar** | Plot satellite azimuth and elevation on a rotating floor compass with concentric elevation rings |
 | **TLE fetch** | Fetches active satellite Two-Line Elements from CelesTrak every second |
 | **Orbit propagation** | SGP4 propagator computes each satellite's topocentric azimuth, elevation, and range from the observer |
 | **Sorting** | The 10 closest satellites are selected by range |
 | **Rendering** | Direct3D 11 holographic pipeline draws each satellite as a colour-coded cube with a label above it, positioned 0.4 m to the ceiling (with some vertical spread per elevation) |
-| **Text panel** | Custom bitmap glyph rendering via a geometry shader animates the info list in 3D at a fixed offset from the user's head position |
+| **Text panel** | Custom 7x9 bitmap glyph rendering via a geometry shader draws the info list in 3D at a fixed offset from the user's head position |
 
 No external render engine — all rendering is custom Direct3D 11 with SharpDX.
 
@@ -82,7 +93,7 @@ HololensSatelliteViewer/
 ├── Common/
 │   └── DeviceResources.cs      # Direct3D device management
 ├── Content/
-│   ├── SatelliteRenderer.cs    # Holographic satellite cube + text rendering
+│   ├── SatelliteRenderer.cs    # Satellite cubes, floor radar, and text rendering
 │   ├── SpatialInputHandler.cs  # Gesture/click input
 │   └── SpinningCubeRenderer.cs # Sample cube (from template)
 ├── Helpers/
@@ -90,10 +101,16 @@ HololensSatelliteViewer/
 ├── Models/
 │   └── Satellite.cs            # Satellite data model (az/el/range/name)
 ├── Services/
+│   ├── BitmapGlyphFont.cs      # 7x9 bitmap font for holographic labels
+│   ├── CompassCalibrationStore.cs # Persistent north calibration
 │   ├── GeolocationService.cs   # HoloLens GPS provider
+│   ├── LocationSettingsModel.cs # Airport, coordinate, and geohash helpers
 │   ├── OrbitService.cs         # TLE fetch + topocentric calculations
 │   ├── Sgp4Service.cs          # Kepler / simplified SGP4 propagator
 │   └── TleService.cs           # CelesTrak HTTP client
+├── Services/airports.tsv       # OurAirports public-domain airport catalog
+├── Utilities/
+│   └── GeohashConverter.cs     # Offline geohash decoder
 ├── privacy/
 │   └── index.html              # Privacy policy (served via GitHub Pages)
 ├── properties/

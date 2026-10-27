@@ -1,5 +1,6 @@
 using System;
 using Windows.Devices.Sensors;
+using HololensSatelliteViewer.Services;
 
 namespace HololensSatelliteViewer.Services
 {
@@ -16,6 +17,15 @@ namespace HololensSatelliteViewer.Services
         /// <summary>Latest magnetic heading in degrees (0–360). 0 if compass unavailable.</summary>
         public float CurrentHeadingDegrees { get; private set; }
 
+        public bool HasHeading { get; private set; }
+
+        private float calibrationOffsetDegrees;
+
+        public float CalibratedHeading
+        {
+            get { return Normalize(CurrentHeadingDegrees - calibrationOffsetDegrees); }
+        }
+
         /// <summary>Raised when the heading changes (on a background thread).</summary>
         public event EventHandler<float> HeadingChanged;
 
@@ -27,6 +37,7 @@ namespace HololensSatelliteViewer.Services
         {
             if (_disposed) return;
 
+            calibrationOffsetDegrees = Normalize(CompassCalibrationStore.LoadOffset());
             _compass = Compass.GetDefault();
             if (_compass == null)
             {
@@ -40,6 +51,12 @@ namespace HololensSatelliteViewer.Services
             _compass.ReadingChanged += OnReadingChanged;
         }
 
+        public void SetCalibrationOffset(float offsetDegrees)
+        {
+            calibrationOffsetDegrees = Normalize(offsetDegrees);
+            CompassCalibrationStore.SaveOffset(calibrationOffsetDegrees);
+        }
+
         private void OnReadingChanged(Compass sender, CompassReadingChangedEventArgs args)
         {
             CompassReading reading = args.Reading;
@@ -51,8 +68,14 @@ namespace HololensSatelliteViewer.Services
                 // Normalize to [0, 360)
                 heading = (heading + 360f) % 360f;
                 CurrentHeadingDegrees = heading;
+                HasHeading = true;
                 HeadingChanged?.Invoke(this, heading);
             }
+        }
+
+        private static float Normalize(float degrees)
+        {
+            return (degrees % 360.0f + 360.0f) % 360.0f;
         }
 
         public void Dispose()

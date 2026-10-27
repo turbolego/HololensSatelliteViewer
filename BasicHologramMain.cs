@@ -23,6 +23,8 @@ using HololensSatelliteViewer.Services;
 using System.Threading.Tasks;
 using Windows.Foundation;
 using System.Collections.Generic;
+using Windows.UI.Popups;
+using Windows.Storage;
 
 #if DRAW_SAMPLE_CONTENT
 using HololensSatelliteViewer.Content;
@@ -53,6 +55,7 @@ namespace HololensSatelliteViewer
 
         // Keep track of mouse input.
         bool pointerPressed = false;
+        private bool settingsDialogShowing;
 
         // Guard against stacking satellite info dialogs.
         private bool _infoDialogShowing = false;
@@ -252,10 +255,19 @@ namespace HololensSatelliteViewer
                 pointerPressed = false;
 
                 // Read the latest compass heading (updated on background thread by CompassService)
-                float compassHeading = compassService?.CurrentHeadingDegrees ?? 0f;
+                float compassHeading = compassService?.CalibratedHeading ?? 0f;
 
                 satelliteRenderer.PositionHologram(headPose);
                 satelliteRenderer.SetCompassHeading(compassHeading);
+
+                if (pointerPressed &&
+                    !settingsDialogShowing &&
+                    satelliteRenderer.CheckSettingsHit(headPose))
+                {
+                    OpenSettingsDialog();
+                }
+
+                pointerPressed = false;
             }
 #endif
 
@@ -460,6 +472,389 @@ namespace HololensSatelliteViewer
         public void OnPointerPressed()
         {
             this.pointerPressed = true;
+        }
+
+        private async void OpenSettingsDialog()
+        {
+            if (settingsDialogShowing)
+            {
+                return;
+            }
+
+            settingsDialogShowing = true;
+            try
+            {
+                await RunLocationSettingsAsync();
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine("[Settings] Dialog error: " + ex.Message);
+            }
+            finally
+            {
+                settingsDialogShowing = false;
+            }
+        }
+
+        private async Task RunLocationSettingsAsync()
+        {
+            while (true)
+            {
+                double latitude;
+                double longitude;
+                bool manual = LocationOverrideStore.TryGet(out latitude, out longitude);
+                bool hasFix = manual || satelliteRenderer.HasObserverFix;
+                if (!manual)
+                {
+                    latitude = satelliteRenderer.HasObserverFix
+                        ? satelliteRenderer.CurrentLatitude
+                        : LocationSettingsModel.Presets[0].Latitude;
+                    longitude = satelliteRenderer.HasObserverFix
+                        ? satelliteRenderer.CurrentLongitude
+                        : LocationSettingsModel.Presets[0].Longitude;
+                }
+
+                string status = string.Format(
+                    "{0}\n{1}",
+                    manual ? "Manual GPS location" : "Device GPS location",
+                    LocationSettingsModel.FormatCoordinates(latitude, longitude));
+                if (!hasFix)
+                {
+                    status = "Waiting for device GPS. Choose a preset or adjust coordinates.\n" +
+                        LocationSettingsModel.FormatCoordinates(latitude, longitude);
+                }
+
+                int choice = await ShowChoiceDialogAsync(
+                    status,
+                    "Location Settings",
+                    "Change GPS",
+                    "Set North",
+                    "Close");
+
+                if (choice == 0)
+                {
+                    await RunLocationActionsAsync(latitude, longitude);
+                }
+                else if (choice == 1)
+                {
+                    if (compassService == null || !compassService.HasHeading)
+                    {
+                        await ShowChoiceDialogAsync(
+                            "No compass heading is available. Try again when the compass is active.",
+                            "Set North",
+                            "OK");
+                        continue;
+                    }
+
+                    compassService.SetCalibrationOffset(compassService.CurrentHeadingDegrees);
+                    await ShowChoiceDialogAsync(
+                        "North aligned to the direction you are facing. The correction is saved for future sessions.",
+                        "Set North",
+                        "OK");
+                }
+                else
+                {
+                    return;
+                }
+            }
+        }
+
+        private async Task RunLocationActionsAsync(double latitude, double longitude)
+        {
+            while (true)
+            {
+                int choice = await ShowChoiceDialogAsync(
+                    "Choose how to set the observer location.",
+                    "Change GPS Location",
+                    "Choose city",
+                    "Enter location",
+                    "Use device GPS");
+
+                if (choice == 0)
+                {
+                    LocationPreset preset = await ChooseLocationPresetAsync();
+                    if (preset != null)
+                    {
+                        LocationOverrideStore.Set(preset.Latitude, preset.Longitude);
+                        return;
+                    }
+                }
+                else if (choice == 1)
+                {
+                    int entryChoice = await ShowChoiceDialogAsync(
+                        LocationSettingsModel.FormatCoordinates(latitude, longitude),
+                        "Enter Location",
+                        "Nearby airports",
+                        "Geohash examples",
+                        "More options");
+                    if (entryChoice == 0)
+                    {
+                        await PickNearbyAirportAsync(latitude, longitude);
+                        return;
+                    }
+                    if (entryChoice == 1)
+                    {
+                        await PickGeohashExampleAsync();
+                        return;
+                    }
+                    if (entryChoice == 2)
+                    {
+                        int adjustChoice = await ShowChoiceDialogAsync(
+                            LocationSettingsModel.FormatCoordinates(latitude, longitude),
+                            "Location Options",
+                            "Adjust coordinates",
+                            "Geohash examples",
+                            "Back");
+                        if (adjustChoice == 0)
+                        {
+                            var coordinates = await AdjustCoordinatesAsync(latitude, longitude);
+                            LocationOverrideStore.Set(coordinates.Item1, coordinates.Item2);
+                            return;
+                        }
+                        if (adjustChoice == 1)
+                        {
+                            await PickGeohashExampleAsync();
+                            return;
+                        }
+                    }
+                }
+                else if (choice == 2)
+                {
+                    LocationOverrideStore.Clear();
+                    return;
+                }
+                else
+                {
+                    return;
+                }
+            }
+        }
+
+        private async Task<LocationPreset> ChooseLocationPresetAsync()
+        {
+            int choice = await ShowChoiceDialogAsync(
+                "Choose a preset location.",
+                "GPS Presets",
+                "Oslo",
+                "London",
+                "More");
+            if (choice == 0) return LocationSettingsModel.Presets[0];
+            if (choice == 1) return LocationSettingsModel.Presets[1];
+            if (choice != 2) return null;
+
+            choice = await ShowChoiceDialogAsync(
+                "Choose a preset location.",
+                "GPS Presets",
+                "New York",
+                "Tokyo",
+                "Sydney");
+            if (choice >= 0 && choice < 3)
+            {
+                return LocationSettingsModel.Presets[choice + 2];
+            }
+
+            return null;
+        }
+
+        private async Task PickNearbyAirportAsync(double latitude, double longitude)
+        {
+            AirportLocation[] airports;
+            try
+            {
+                var catalogFile = await StorageFile.GetFileFromApplicationUriAsync(
+                    new Uri("ms-appx:///Services/airports.tsv"));
+                IList<string> catalogLines = await FileIO.ReadLinesAsync(catalogFile);
+                airports = LocationSettingsModel.FindThreeClosestAirports(
+                    LocationSettingsModel.ParseAirportCatalog(catalogLines),
+                    latitude,
+                    longitude);
+            }
+            catch (Exception exception)
+            {
+                await ShowChoiceDialogAsync(
+                    "Airport data could not be loaded: " + exception.Message,
+                    "Nearby Airports",
+                    "OK");
+                return;
+            }
+
+            if (airports.Length == 0)
+            {
+                await ShowChoiceDialogAsync(
+                    "No airports were found in the airport catalog.",
+                    "Nearby Airports",
+                    "OK");
+                return;
+            }
+
+            int index = 0;
+            while (true)
+            {
+                AirportLocation airport = airports[index];
+                string details = string.Format(
+                    "{0} {1}\n{2}",
+                    airport.Iata,
+                    airport.Name,
+                    LocationSettingsModel.FormatCoordinates(airport.Latitude, airport.Longitude));
+                int choice = await ShowChoiceDialogAsync(
+                    details,
+                    string.Format("Nearby Airports ({0}/{1})", index + 1, airports.Length),
+                    "Use airport",
+                    "Next",
+                    "Back");
+
+                if (choice == 0)
+                {
+                    LocationOverrideStore.Set(airport.Latitude, airport.Longitude);
+                    return;
+                }
+                if (choice == 1)
+                {
+                    index = (index + 1) % airports.Length;
+                    continue;
+                }
+                return;
+            }
+        }
+
+        private async Task PickGeohashExampleAsync()
+        {
+            string[] hashes = { "u4pruydqqvj", "u4pruyd", "u4pruy" };
+            int index = 0;
+            while (true)
+            {
+                string geohash = hashes[index];
+                double latitude;
+                double longitude;
+                if (!LocationSettingsModel.TryDecodeGeohash(geohash, out latitude, out longitude))
+                {
+                    await ShowChoiceDialogAsync(
+                        "The sample geohash could not be decoded.",
+                        "Geohash",
+                        "OK");
+                    return;
+                }
+
+                int choice = await ShowChoiceDialogAsync(
+                    string.Format(
+                        "Geohash: {0}\n{1}",
+                        geohash,
+                        LocationSettingsModel.FormatCoordinates(latitude, longitude)),
+                    "Geohash Examples",
+                    "Use location",
+                    "Next",
+                    "Back");
+
+                if (choice == 0)
+                {
+                    LocationOverrideStore.Set(latitude, longitude);
+                    return;
+                }
+                if (choice == 1)
+                {
+                    index = (index + 1) % hashes.Length;
+                    continue;
+                }
+                return;
+            }
+        }
+
+        private async Task<Tuple<double, double>> AdjustCoordinatesAsync(double latitude, double longitude)
+        {
+            while (true)
+            {
+                int choice = await ShowChoiceDialogAsync(
+                    LocationSettingsModel.FormatCoordinates(latitude, longitude),
+                    "Adjust GPS",
+                    "Edit latitude",
+                    "Edit longitude",
+                    "Done");
+                if (choice == 0)
+                {
+                    latitude = await AdjustCoordinateAsync(latitude, true, latitude, longitude);
+                }
+                else if (choice == 1)
+                {
+                    longitude = await AdjustCoordinateAsync(longitude, false, latitude, longitude);
+                }
+                else
+                {
+                    return Tuple.Create(latitude, longitude);
+                }
+            }
+        }
+
+        private async Task<double> AdjustCoordinateAsync(
+            double coordinate,
+            bool isLatitude,
+            double latitude,
+            double longitude)
+        {
+            int stepChoice = await ShowChoiceDialogAsync(
+                LocationSettingsModel.FormatCoordinates(latitude, longitude),
+                isLatitude ? "Latitude step" : "Longitude step",
+                "1 degree",
+                "0.1 degree",
+                "0.01 degree");
+            if (stepChoice < 0 || stepChoice > 2)
+            {
+                return coordinate;
+            }
+
+            double[] steps = { 1.0, 0.1, 0.01 };
+            double step = steps[stepChoice];
+            while (true)
+            {
+                string formattedStep = LocationSettingsModel.FormatStep(step);
+                int choice = await ShowChoiceDialogAsync(
+                    LocationSettingsModel.FormatCoordinates(latitude, longitude),
+                    isLatitude ? "Adjust latitude" : "Adjust longitude",
+                    "+ " + formattedStep,
+                    "- " + formattedStep,
+                    "Done");
+                if (choice == 2 || choice < 0)
+                {
+                    return coordinate;
+                }
+
+                double delta = choice == 0 ? step : -step;
+                coordinate = isLatitude
+                    ? LocationSettingsModel.AdjustLatitude(coordinate, delta)
+                    : LocationSettingsModel.AdjustLongitude(coordinate, delta);
+                if (isLatitude)
+                {
+                    latitude = coordinate;
+                }
+                else
+                {
+                    longitude = coordinate;
+                }
+            }
+        }
+
+        private static async Task<int> ShowChoiceDialogAsync(
+            string content,
+            string title,
+            params string[] labels)
+        {
+            if (labels == null || labels.Length == 0 || labels.Length > 3)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(labels),
+                    "MessageDialog supports between one and three commands.");
+            }
+
+            int selected = -1;
+            var dialog = new MessageDialog(content, title);
+            for (int i = 0; i < labels.Length; i++)
+            {
+                int index = i;
+                dialog.Commands.Add(new UICommand(labels[i], command => selected = index));
+            }
+
+            dialog.DefaultCommandIndex = 0;
+            await dialog.ShowAsync();
+            return selected;
         }
 
         /// <summary>

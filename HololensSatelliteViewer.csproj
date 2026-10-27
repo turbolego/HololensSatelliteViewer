@@ -85,6 +85,11 @@
     <Compile Include="Services\TleParser.cs" />
     <Compile Include="Services\SatelliteSelection.cs" />
     <Compile Include="Services\CompassService.cs" />
+    <Compile Include="Services\CompassCalibrationStore.cs" />
+    <Compile Include="Services\LocationOverrideStore.cs" />
+    <Compile Include="Services\LocationSettingsModel.cs" />
+    <Compile Include="Services\BitmapGlyphFont.cs" />
+    <Compile Include="Utilities\GeohashConverter.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
 
@@ -94,6 +99,7 @@
     <Content Include="Assets\Square44x44Logo.png" />
     <Content Include="Assets\SplashScreen.png" />
     <Content Include="Assets\Wide310x150Logo.png" />
+    <Content Include="Services\airports.tsv" />
   </ItemGroup>
 
   <ItemGroup>
