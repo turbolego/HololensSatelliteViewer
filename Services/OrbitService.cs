@@ -8,7 +8,7 @@ using HololensSatelliteViewer.Models;
 namespace HololensSatelliteViewer.Services
 {
     /// <summary>
-    /// Fetches TLE data from Celestrak with fallback to hardcoded TLEs.
+    /// Fetches TLE data from CelesTrak (three category feeds) with fallback to hardcoded TLEs.
     /// Computes topocentric azimuth/elevation for each satellite relative
     /// to the observer's geodetic position using GMST rotation.
     /// </summary>
@@ -20,16 +20,14 @@ namespace HololensSatelliteViewer.Services
             Timeout = TimeSpan.FromSeconds(15)
         };
 
-        // ── CelesTrak GP API Endpoints ─────────────────────────────────────
-        // We use FORMAT=tle to maintain compatibility with the existing parser.
-        // Groups are MERGED (not first-success) so both LEO/near-Earth and
-        // geostationary (GOES etc.) satellites are available; GOES-class birds
-        // live in the "geo" group, which the old code never fetched.
-        private static readonly string[] TleUrls = new[]
+        // ── CelesTrak GP API Endpoints ──────────────────────────────────────
+        // FORMAT=tle keeps the response compatible with the existing TLE parser.
+        private static readonly KeyValuePair<string, SatelliteCategory>[] TleFeeds = new[]
         {
-            "https://celestrak.org/NORAD/elements/gp.php?GROUP=visual&FORMAT=tle",
-            "https://celestrak.org/NORAD/elements/gp.php?GROUP=stations&FORMAT=tle",
-            "https://celestrak.org/NORAD/elements/gp.php?GROUP=geo&FORMAT=tle",
+            new KeyValuePair<string, SatelliteCategory>("https://celestrak.org/NORAD/elements/gp.php?GROUP=visual&FORMAT=tle", SatelliteCategory.Satellite),
+            new KeyValuePair<string, SatelliteCategory>("https://celestrak.org/NORAD/elements/gp.php?GROUP=stations&FORMAT=tle", SatelliteCategory.Satellite),
+            new KeyValuePair<string, SatelliteCategory>("https://celestrak.org/NORAD/elements/gp.php?GROUP=geo&FORMAT=tle", SatelliteCategory.Geostation),
+            new KeyValuePair<string, SatelliteCategory>("https://celestrak.org/NORAD/elements/gp.php?NAME=DEB&FORMAT=tle", SatelliteCategory.Debris),
         };
 
         private List<TleRecord> _tleRecords = new List<TleRecord>();
@@ -41,11 +39,15 @@ namespace HololensSatelliteViewer.Services
         private double _observerAltitudeKm  =   0.0;
 
         // ── Diagnostics ────────────────────────────────────────────────────
-        public int    TleCount        { get; private set; }
-        public int    PropagatedCount { get; private set; }
-        public int    AboveHorizon    { get; private set; }
-        public string LastError       { get; private set; } = string.Empty;
-        public string EciDebug        { get; private set; } = string.Empty;
+        public int    TleCount              { get; private set; }
+        public int    PropagatedCount       { get; private set; }
+        public int    AboveHorizon          { get; private set; }
+        // Per-category above-horizon counts (usable by the renderer for toggle-button labels)
+        public int    SatelliteAboveHorizon  { get; private set; }
+        public int    GeostationAboveHorizon { get; private set; }
+        public int    DebrisAboveHorizon     { get; private set; }
+        public string LastError             { get; private set; } = string.Empty;
+        public string EciDebug              { get; private set; } = string.Empty;
         // ──────────────────────────────────────────────────────────────────
 
         // Hardcoded fallback TLEs — 20 satellites across many orbital planes.
@@ -123,6 +125,18 @@ GRACE-FO 2
             TleCount       = _tleRecords.Count;
         }
 
+        /// <summary>
+        /// For unit-tests only. Pre-loads a known set of records and bypasses all network fetches.
+        /// </summary>
+        internal OrbitService(List<TleRecord> records)
+        {
+            _sgp4Service   = new Sgp4Service();
+            _tleRecords    = records;
+            _usingFallback = false;
+            _lastTleUpdate = DateTime.UtcNow;   // mark as fresh — EnsureTleDataAsync is a no-op
+            TleCount       = records.Count;
+        }
+
         public async Task<List<Satellite>> GetLiveSatellitesAsync(DateTime? customTime = null)
         {
             await EnsureTleDataAsync();
@@ -137,6 +151,7 @@ GRACE-FO 2
                 try
                 {
                     var sat = _sgp4Service.Propagate(tle, utcNow);
+                    sat.Category = tle.Category;    // propagate the category tag through to the Satellite
                     ComputeObserverRelativePosition(sat, utcNow);
 
                     if (first)
@@ -161,8 +176,11 @@ GRACE-FO 2
                 }
             }
 
-            PropagatedCount = all.Count;
-            AboveHorizon    = all.Count(s => s.Elevation > 0.0);
+            PropagatedCount      = all.Count;
+            AboveHorizon         = all.Count(s => s.Elevation > 0.0);
+            SatelliteAboveHorizon  = all.Count(s => s.Elevation > 0.0 && s.Category == SatelliteCategory.Satellite);
+            GeostationAboveHorizon = all.Count(s => s.Elevation > 0.0 && s.Category == SatelliteCategory.Geostation);
+            DebrisAboveHorizon     = all.Count(s => s.Elevation > 0.0 && s.Category == SatelliteCategory.Debris);
 
             return all
                 .Where(s => s.Elevation > 0.0)
@@ -175,56 +193,59 @@ GRACE-FO 2
         {
             var age = DateTime.UtcNow - _lastTleUpdate;
 
-            // Fresh live TLEs — nothing to do
             if (!_usingFallback && age.TotalHours < 6.0)
                 return;
 
-            // On fallback: retry network every 60 s
             if (_usingFallback && _lastTleUpdate != DateTime.MinValue
                 && age.TotalSeconds < 60.0)
                 return;
 
-            // Collect live records across ALL group URLs (visual + stations +
-            // geo). Dedupe within the live set; once ANY live data arrives it
-            // REPLACES the hardcoded fallback TLEs entirely (fallback entries
-            // are stale — keeping them would freeze old orbits forever).
             var liveRecords = new List<TleRecord>();
-            foreach (var url in TleUrls)
+            var fetchErrors = new List<string>();
+
+            foreach (var feed in TleFeeds)
             {
+                string url = feed.Key;
+                SatelliteCategory category = feed.Value;
+                int cap = category == SatelliteCategory.Debris ? 200 : 300;
+
                 try
                 {
-                    var text    = await _http.GetStringAsync(url);
+                    var text = await _http.GetStringAsync(url);
                     var records = TleParser.Parse(text);
-                    foreach (var rec in records)
+
+                    foreach (var record in records.Take(cap))
                     {
-                        if (!liveRecords.Any(r => r.NoradId == rec.NoradId))
-                            liveRecords.Add(rec);
+                        if (liveRecords.Any(existing => existing.NoradId == record.NoradId))
+                            continue;
+
+                        record.Category = category;
+                        liveRecords.Add(record);
                     }
-                    _lastTleUpdate = DateTime.UtcNow;
-                    _usingFallback = false;
-                    LastError      = string.Empty;
-                    // Continue to next URL: we want ALL groups merged.
                 }
                 catch (Exception ex)
                 {
-                    if (LastError == string.Empty)
-                        LastError = "API:" + Truncate(ex.Message, 20);
+                    fetchErrors.Add(category.ToString()[0] + ":" + Truncate(ex.Message, 12));
                 }
             }
 
             if (liveRecords.Count > 0)
             {
                 _tleRecords = liveRecords;
+                _usingFallback = false;
+                LastError = fetchErrors.Count > 0
+                    ? string.Join(" ", fetchErrors)
+                    : string.Empty;
+            }
+            else
+            {
+                LastError = fetchErrors.Count > 0
+                    ? string.Join(" ", fetchErrors)
+                    : "Empty response from all feeds";
             }
 
+            _lastTleUpdate = DateTime.UtcNow;
             TleCount = _tleRecords.Count;
-
-            // If nothing was fetched, keep whatever we have (fallback or previous)
-            if (_tleRecords.Count > 0)
-                return;
-
-            _lastTleUpdate = DateTime.UtcNow;   // reset timer so we retry in 60 s
-            TleCount       = _tleRecords.Count;
         }
 
         /// <summary>
@@ -232,7 +253,7 @@ GRACE-FO 2
         /// Also handles 2-line format (line1 / line2, no name).
         /// Delegates to the pure TleParser so the logic is unit-testable.
         /// </summary>
-        private static List<TleRecord> ParseTleText(string text)
+        internal static List<TleRecord> ParseTleText(string text)
             => TleParser.Parse(text);
 
         private static string ShortName(string name)
@@ -250,14 +271,14 @@ GRACE-FO 2
         }
 
         // ── ECI → Topocentric (East-North-Up) ────────────────────────────────
-        private void ComputeObserverRelativePosition(Satellite sat, DateTime utcTime)
+        internal void ComputeObserverRelativePosition(Satellite sat, DateTime utcTime)
         {
             var latRad = _observerLatitude  * Math.PI / 180.0;
             var lonRad = _observerLongitude * Math.PI / 180.0;
 
             // Rotate geographic longitude into ECI frame via GMST.
             // Without this, the observer sits at the wrong point on the globe in ECI space.
-            var gmst   = ComputeGmst(utcTime);
+            var gmst   = AstroMath.ComputeGmst(utcTime);
             var eciLon = lonRad + gmst;
 
             var Re   = 6378.137 + _observerAltitudeKm;   // observer geocentric radius (km)
@@ -292,38 +313,18 @@ GRACE-FO 2
             sat.RangeKm   = range;
         }
 
-        // ── GMST (Vallado 2013 eq. 3-45) ─────────────────────────────────────
-        private static double ComputeGmst(DateTime utcTime)
-        {
-            int    Y  = utcTime.Year;
-            int    M  = utcTime.Month;
-            int    D  = utcTime.Day;
-            double UT = utcTime.Hour + utcTime.Minute / 60.0
-                        + utcTime.Second / 3600.0
-                        + utcTime.Millisecond / 3_600_000.0;
-
-            double jd = 367.0 * Y
-                       - Math.Floor(7.0 * (Y + Math.Floor((M + 9.0) / 12.0)) / 4.0)
-                       + Math.Floor(275.0 * M / 9.0)
-                       + D + 1_721_013.5
-                       + UT / 24.0;
-
-            const double J2000 = 2_451_545.0;
-            double T = (jd - J2000) / 36_525.0;
-
-            double gmstDeg = 280.460_618_37
-                           + 360.985_647_366_29 * (jd - J2000)
-                           + 0.000_387_933      * T * T
-                           - T * T * T / 38_710_000.0;
-
-            gmstDeg = gmstDeg % 360.0;
-            if (gmstDeg < 0.0) gmstDeg += 360.0;
-
-            return gmstDeg * Math.PI / 180.0;
-        }
-
         public void SetObserverLocation(double latitude, double longitude, double altitudeKm)
         {
+            if (double.IsNaN(latitude) || latitude < -90.0 || latitude > 90.0)
+                throw new ArgumentOutOfRangeException(nameof(latitude), latitude,
+                    "Latitude must be in [-90.0, 90.0].");
+            if (double.IsNaN(longitude) || longitude < -180.0 || longitude > 180.0)
+                throw new ArgumentOutOfRangeException(nameof(longitude), longitude,
+                    "Longitude must be in [-180.0, 180.0].");
+            if (double.IsNaN(altitudeKm) || altitudeKm < 0.0)
+                throw new ArgumentOutOfRangeException(nameof(altitudeKm), altitudeKm,
+                    "Altitude must be non-negative.");
+
             _observerLatitude   = latitude;
             _observerLongitude  = longitude;
             _observerAltitudeKm = altitudeKm;

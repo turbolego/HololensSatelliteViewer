@@ -241,6 +241,11 @@ namespace HololensSatelliteViewer
                 SpatialPointerPose headPose = SpatialPointerPose.TryGetAtTimestamp(
                     stationaryReferenceFrame.CoordinateSystem, prediction.Timestamp);
 
+                if (pointerState != null && headPose != null)
+                {
+                    satelliteRenderer.OnAirTap(headPose);
+                }
+
                 // Check for satellite tap
                 if (pointerPressed && !_infoDialogShowing)
                 {
@@ -250,8 +255,6 @@ namespace HololensSatelliteViewer
                         ShowSatelliteInfoDialog(hitSat);
                     }
                 }
-
-                pointerPressed = false;
 
                 // Read the latest compass heading (updated on background thread by CompassService)
                 float compassHeading = compassService?.CalibratedHeading ?? 0f;

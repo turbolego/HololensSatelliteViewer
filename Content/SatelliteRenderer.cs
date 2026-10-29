@@ -61,6 +61,11 @@ namespace HololensSatelliteViewer.Content
 
         private string gpsDebug = "GPS: --";
 
+        // ── Category visibility toggles (changed via air-tap on in-world buttons) ──────
+        private bool showSatellites  = true;
+        private bool showGeostations = true;
+        private bool showDebris      = true;
+        // ─────────────────────────────────────────────────────────────────────
         private const int MaxSatellitesRendered = 10;
         private const float SatCubeScale = 0.25f;
         private const float DomeRadiusMeters = 2.5f;
@@ -71,6 +76,7 @@ namespace HololensSatelliteViewer.Content
         private const float DebugLineSpacing = 0.08f;
         private const float FloorRadarRadius = 0.8f;
         private const float FloorRadarOffset = 0.5f;
+        private const float ToggleButtonHitRadius = 0.08f;
 
         private const int AtlasCols = 16;
         private const int AtlasRows = 8;
@@ -136,14 +142,11 @@ namespace HololensSatelliteViewer.Content
                     }
 
                     var live = await orbitService.GetLiveSatellitesAsync();
-                    // Rank by elevation (best-visible first), NOT by range:
-                    // range-ranking would always drop geostationary satellites
-                    // (GOES etc., ~35,000+ km away) in favor of nearby LEO
-                    // objects, even when the GEO bird is high in the sky.
-                    // Elevation drives the dome position; range is irrelevant
-                    // to rendering here.
+                    var visible = live.Where(IsVisible).ToList();
+                    // Rank by elevation so high geostationary satellites are not
+                    // displaced by nearer low-orbit objects.
                     var closest = SatelliteSelection.BestVisible(
-                        live, MaxSatellitesRendered);
+                        visible, MaxSatellitesRendered);
 
                     satellites = closest;
 
@@ -223,6 +226,33 @@ namespace HololensSatelliteViewer.Content
             var closestPoint = headPose.Head.Position + gazeDirection * distanceAlongGaze;
             const float hitRadius = 0.24f;
             return (buttonPosition - closestPoint).LengthSquared() < hitRadius * hitRadius;
+        }
+
+        /// <summary>
+        /// Called when the user performs an air-tap gesture. Tests gaze against
+        /// the category-toggle buttons and flips the matching visibility flag.
+        /// </summary>
+        public void OnAirTap(SpatialPointerPose headPose)
+        {
+            if (headPose == null || !worldCenterLocked) return;
+
+            var gazeOrigin = headPose.Head.Position;
+            var gazeForward = headPose.Head.ForwardDirection;
+
+            if (GazeHitTest.Hits(gazeOrigin, gazeForward, GetButtonPos(0), ToggleButtonHitRadius))
+                showSatellites = !showSatellites;
+            else if (GazeHitTest.Hits(gazeOrigin, gazeForward, GetButtonPos(1), ToggleButtonHitRadius))
+                showGeostations = !showGeostations;
+            else if (GazeHitTest.Hits(gazeOrigin, gazeForward, GetButtonPos(2), ToggleButtonHitRadius))
+                showDebris = !showDebris;
+        }
+
+        private Vector3 GetButtonPos(int idx)
+            => worldCenter + new Vector3(0.25f, 0.35f - idx * 0.18f, -1.15f);
+
+        private bool IsVisible(Models.Satellite sat)
+        {
+            return SatelliteVisibility.IsVisible(sat, showSatellites, showGeostations, showDebris);
         }
 
         private void RenderSatellites()
@@ -376,10 +406,10 @@ namespace HololensSatelliteViewer.Content
             lines.Add(gpsDebug);
             lines.Add(string.Format(
                 CultureInfo.InvariantCulture,
-                "TLE:{0} PROP:{1} VIS:{2} T:{3:ss}",
-                orbitService.TleCount,
-                orbitService.PropagatedCount,
-                orbitService.AboveHorizon,
+                "S:{0} G:{1} D:{2} T:{3:ss}",
+                orbitService.SatelliteAboveHorizon,
+                orbitService.GeostationAboveHorizon,
+                orbitService.DebrisAboveHorizon,
                 DateTime.UtcNow));
 
             // ECI sanity-check row
@@ -421,6 +451,24 @@ namespace HololensSatelliteViewer.Content
             {
                 Vector3 p = new Vector3(panelCenter.X - 0.7f, startY - i * DebugLineSpacing, panelCenter.Z);
                 DrawTextBillboard(Sanitize(lines[i]), p, DebugTextSize, false, compassHeadingDegrees);
+            }
+
+            context.PixelShader.SetShaderResource(0, null);
+
+            // ── Category toggle buttons ───────────────────────────────────────────
+            // Rendered to the right of the debug panel; gaze at one and air-tap to toggle.
+            context.PixelShader.SetShaderResource(0, glyphAtlasSrv);
+            context.PixelShader.SetSampler(0, textSampler);
+
+            var btnLabels = new[]
+            {
+                "SAT:" + (showSatellites  ? "ON" : "--"),
+                "GEO:" + (showGeostations ? "ON" : "--"),
+                "DEB:" + (showDebris      ? "ON" : "--"),
+            };
+            for (int i = 0; i < btnLabels.Length; i++)
+            {
+                DrawTextBillboard(btnLabels[i], GetButtonPos(i), DebugTextSize, false, compassHeadingDegrees);
             }
 
             context.PixelShader.SetShaderResource(0, null);

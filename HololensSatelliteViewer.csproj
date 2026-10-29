@@ -77,6 +77,7 @@
     <Compile Include="Content\SpatialInputHandler.cs" />
     <Compile Include="Content\SatelliteRenderer.cs" />
     <Compile Include="Models\Satellite.cs" />
+    <Compile Include="Models\SatelliteCategory.cs" />
     <Compile Include="Models\TleRecord.cs" />
     <Compile Include="Services\GeolocationService.cs" />
     <Compile Include="Services\TleService.cs" />
@@ -90,6 +91,9 @@
     <Compile Include="Services\LocationSettingsModel.cs" />
     <Compile Include="Services\BitmapGlyphFont.cs" />
     <Compile Include="Utilities\GeohashConverter.cs" />
+    <Compile Include="Services\AstroMath.cs" />
+    <Compile Include="Services\GazeHitTest.cs" />
+    <Compile Include="Services\SatelliteVisibility.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>
 

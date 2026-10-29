@@ -22,5 +22,8 @@ namespace HololensSatelliteViewer.Models
         public double X { get; set; }
         public double Y { get; set; }
         public double Z { get; set; }
+
+        /// <summary>Orbital / operational category — set from the CelesTrak feed that provided this record.</summary>
+        public SatelliteCategory Category { get; set; }
     }
 }
